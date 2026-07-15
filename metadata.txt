@@ -1,0 +1,25 @@
+[general]
+name=Raster Caster
+qgisMinimumVersion=3.22
+qgisMaximumVersion=4.99
+description=A QGIS plugin for raster casting
+version=0.1
+author=Nelen & Schuurmans
+email=servicedesk@nelen-schuurmans.nl
+
+about=A QGIS plugin for raster casting
+
+tracker=https://github.com/nens/raster_caster_plugin
+repository=https://github.com/nens/raster_caster_plugin
+
+changelog=https://github.com/nens/raster_caster_plugin/CHANGES.rst
+
+tags=analysis, modelling, raster, dem
+homepage=https://github.com/nens/raster_caster_plugin
+category=Plugins
+icon=icons/rana_blue_on_transparent.svg
+experimental=True
+hasProcessingProvider=yes
+
+# deprecated flag (applies to the whole plugin, not just a single version)
+deprecated=False
