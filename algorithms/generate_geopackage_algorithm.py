@@ -15,7 +15,7 @@ class GenerateGeopackageAlgorithm(QgsProcessingAlgorithm):
     Tables created:
         surface          – Polygon
         auxiliary_line   – MultiLineStringZ
-        elevation_point  – Point  (with a second PointZ column ``geom_3d``)
+        elevation_point  – PointZ
     """
 
     OUTPUT = "OUTPUT"
@@ -104,7 +104,7 @@ class GenerateGeopackageAlgorithm(QgsProcessingAlgorithm):
 
     @staticmethod
     def create_el_point(ds: ogr.DataSource, srs: osr.SpatialReference) -> None:
-        lyr = ds.CreateLayer("elevation_point", srs, ogr.wkbPoint)
+        lyr = ds.CreateLayer("elevation_point", srs, ogr.wkbPoint25D)
 
         lyr.CreateField(ogr.FieldDefn("comment", ogr.OFTString))
         lyr.CreateField(ogr.FieldDefn("elevation", ogr.OFTReal))
@@ -113,7 +113,3 @@ class GenerateGeopackageAlgorithm(QgsProcessingAlgorithm):
         fld.SetSubType(ogr.OFSTBoolean)
         fld.SetDefault("0")
         lyr.CreateField(fld)
-
-        geom_fld = ogr.GeomFieldDefn("geom_3d", ogr.wkbPoint25D)
-        geom_fld.SetSpatialRef(srs)
-        lyr.CreateGeomField(geom_fld)
