@@ -6,6 +6,7 @@ from qgis.core import (
     QgsProcessingContext,
     QgsProcessingFeedback,
     QgsProcessingParameterFileDestination,
+    QgsVectorLayer,
 )
 
 
@@ -69,6 +70,16 @@ class GenerateGeopackageAlgorithm(QgsProcessingAlgorithm):
         self.create_el_point(ds, srs)
 
         ds = None  # flush and close
+
+        layer_names = ["surface", "auxiliary_line", "elevation_point"]
+        for name in layer_names:
+            uri = f"{output_path}|layername={name}"
+            layer = QgsVectorLayer(uri, name, "ogr")
+            context.temporaryLayerStore().addMapLayer(layer)
+            context.addLayerToLoadOnCompletion(
+                layer.id(),
+                QgsProcessingContext.LayerDetails(name, context.project(), name),
+            )
 
         return {self.OUTPUT: output_path}
 
