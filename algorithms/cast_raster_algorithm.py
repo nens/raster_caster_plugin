@@ -105,19 +105,25 @@ class CastRasterAlgorithm(QgsProcessingAlgorithm):
         srs = layer.GetSpatialRef()
         ds = None
 
-        min_x, max_x, min_y, max_y = extent
-        cols = math.ceil((max_x - min_x) / pixel_size)
-        rows = math.ceil((max_y - min_y) / pixel_size)
+        if raster is not None:
+            src_ds = gdal.Open(raster.source())
+            driver = gdal.GetDriverByName("GTiff")
+            out_ds = driver.CreateCopy(output_path, src_ds)
+            src_ds = None
+        else:
+            min_x, max_x, min_y, max_y = extent
+            cols = math.ceil((max_x - min_x) / pixel_size)
+            rows = math.ceil((max_y - min_y) / pixel_size)
 
-        driver = gdal.GetDriverByName("GTiff")
-        out_ds = driver.Create(output_path, cols, rows, 1, gdal.GDT_Float32)
-        out_ds.SetGeoTransform((min_x, pixel_size, 0, max_y, 0, -pixel_size))
-        out_ds.SetProjection(srs.ExportToWkt())
+            driver = gdal.GetDriverByName("GTiff")
+            out_ds = driver.Create(output_path, cols, rows, 1, gdal.GDT_Float32)
+            out_ds.SetGeoTransform((min_x, pixel_size, 0, max_y, 0, -pixel_size))
+            out_ds.SetProjection(srs.ExportToWkt())
 
-        band = out_ds.GetRasterBand(1)
-        band.SetNoDataValue(-9999.0)
+            band = out_ds.GetRasterBand(1)
+            band.SetNoDataValue(-9999.0)
 
-        band.WriteArray(np.ones((rows, cols), dtype=np.float32))
+            band.WriteArray(np.ones((rows, cols), dtype=np.float32))
 
         gdal.Rasterize(
             out_ds,
