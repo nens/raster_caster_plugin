@@ -13,6 +13,8 @@ from qgis.core import (
     QgsProcessingParameterRasterLayer,
 )
 
+from .casting import apply_constant, apply_tin
+
 
 class CastRasterAlgorithm(QgsProcessingAlgorithm):
     """Skeleton algorithm — implementation pending."""
@@ -99,12 +101,12 @@ class CastRasterAlgorithm(QgsProcessingAlgorithm):
         else:
             pixel_size = self.parameterAsDouble(parameters, self.PIXEL_SIZE, context)
 
-        ds = ogr.Open(gpkg_path)
-        layer = ds.GetLayerByName("surface")
+        gpkg_ds = ogr.Open(gpkg_path)
+        layer = gpkg_ds.GetLayerByName("surface")
         extent = layer.GetExtent()  # (minX, maxX, minY, maxY)
         srs = layer.GetSpatialRef()
-        ds = None
 
+        # Create the new raster
         if raster is not None:
             src_ds = gdal.Open(raster.source())
             driver = gdal.GetDriverByName("GTiff")
@@ -122,17 +124,12 @@ class CastRasterAlgorithm(QgsProcessingAlgorithm):
 
             band = out_ds.GetRasterBand(1)
             band.SetNoDataValue(-9999.0)
-
             band.WriteArray(np.ones((rows, cols), dtype=np.float32))
 
-        gdal.Rasterize(
-            out_ds,
-            gpkg_path,
-            layers=["surface"],
-            attribute="param_1",
-            where="definition_type = 'constant'",
-        )
+        apply_constant(gpkg_path, out_ds)
+        apply_tin(gpkg_ds, layer, out_ds, pixel_size)
 
         out_ds = None
+        gpkg_ds = None
 
         return {self.OUTPUT: output_path}

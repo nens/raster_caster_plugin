@@ -1,0 +1,10 @@
+services:
+  qgis:
+    build: .
+
+    volumes:
+      - .:/code
+    environment:
+      - DISPLAY=unix${DISPLAY}
+      - QT_QPA_PLATFORM=offscreen
+      - XDG_RUNTIME_DIR=/tmp/runtime-root
