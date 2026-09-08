@@ -2,6 +2,7 @@ from typing import Any
 
 import numpy as np
 from osgeo import gdal, ogr
+from shapely import constrained_delaunay_triangles, from_wkb
 
 from .utils import periodic_linear_interp
 
@@ -17,17 +18,16 @@ def apply_constant(gpkg_path: str, out_ds: Any) -> None:
 
 
 def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, pixel_size: float) -> None:
+    # Retrieve tin surfaces
     layer.SetAttributeFilter("definition_type = 'tin'")
     tin_surface_features = [f for f in layer]
     layer.SetAttributeFilter(None)
 
-    # band = out_ds.GetRasterBand(1)
     elev_point_layer = gpkg_ds.GetLayerByName("elevation_point")
 
     # TODO: add in_polygon_only feature
     for tin_surface in tin_surface_features:
-        # retrieve the elevation points in the tin surface geometry
-        # and convert to PolygonZ
+        # Convert surface to PolygonZ
         tin_geom = tin_surface.GetGeometryRef()
         polygon_z = ogr.Geometry(ogr.wkbPolygon25D)
         for ring_index in range(tin_geom.GetGeometryCount()):
@@ -46,7 +46,7 @@ def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, pixel_size: float) -> None:
                 (
                     f.GetGeometryRef().GetX(),
                     f.GetGeometryRef().GetY(),
-                    f.GetGeometryRef().GetZ(),
+                    f["elevation"],  # Note that this is not the elevation, just 0
                 )
                 for f in elev_point_layer
             ]
@@ -60,16 +60,24 @@ def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, pixel_size: float) -> None:
         exterior = tin_geom.GetGeometryRef(0)  # 0 is exterior?
         tin_vertices = np.array(
             [
-                exterior.GetPoint(index)[:2]
+                exterior.GetPoint(index)[:2]  # drop Z
                 for index in range(exterior.GetPointCount() - 1)
             ]
         )
-        distances = elev_coords[:, None, :2] - tin_vertices[None, :, :]
+        # Use 2D for distance
+        elev_xy = elev_coords[:, :2]  # drop Z
+        # newaxis allows for broadcasting:
+        # (distances[i, j] = elev_xy[i] - tin_vertices[j])
+        distances = elev_xy[:, np.newaxis] - tin_vertices[np.newaxis, :]
+        # Sum the squared x-distance and y-distance, and take the minimum
         nearest_vertex_indices = np.argmin(
             np.sum(distances * distances, axis=2), axis=1
         )
+        for elevation_point, vertex_index in zip(elev_coords, nearest_vertex_indices):
+            print(elevation_point[:2], tin_vertices[vertex_index])
 
-        # Replace each nearest exterior vertex Z-value with the elevation point Z-value.
+        # Replace each nearest exterior vertex Z-value with the elevation point
+        # value (Note that this is not the Z-value, but the attribute value
         closing_point_index = exterior.GetPointCount() - 1
         for elevation_point, vertex_index in zip(elev_coords, nearest_vertex_indices):
             x, y, z = exterior.GetPoint(int(vertex_index))
@@ -78,26 +86,42 @@ def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, pixel_size: float) -> None:
                 # The exterior ring is closed, update both start and end
                 exterior.SetPoint(closing_point_index, x, y, elevation_point[2])
 
-        vertex_z = np.array(
-            [exterior.GetPoint(index)[2] for index in range(len(tin_vertices))]
-        )
+        # Determine the individual segment lengths and perimenter of the geometry by
+        # determining the norm between a vertex and the previous
+        # validated in QGIS with Measurement tool (extract vertices)
         edge_lengths = np.linalg.norm(
             np.roll(tin_vertices, -1, axis=0) - tin_vertices,
             axis=1,
         )
-        arc_lengths = np.concatenate(([0.0], np.cumsum(edge_lengths[:-1])))
+        # Validated in QGIS with $perimeter
         perimeter = float(np.sum(edge_lengths))
-        known_vertices = vertex_z != -9999.0
 
-        if perimeter > 0 and np.any(known_vertices):
-            vertex_z[~known_vertices] = periodic_linear_interp(
-                arc_lengths[~known_vertices],
-                arc_lengths[known_vertices],
-                vertex_z[known_vertices],
+        tin_vertices_z = np.array(
+            [exterior.GetPoint(index)[2] for index in range(len(tin_vertices))]
+        )
+        known_vertices_mask = tin_vertices_z != -9999.0
+        # Calculate the distance along the polygon perimeter to the start of each
+        # vertex.
+        # Take cumulutive sum up to second last edge, prepend with 0.0 for first vertex
+        # Note that the final arc (returning to first vertex) is excluded.
+        arc_lengths = np.concatenate(([0.0], np.cumsum(edge_lengths[:-1])))
+        if perimeter > 0 and np.any(known_vertices_mask):
+            tin_vertices_z[~known_vertices_mask] = periodic_linear_interp(
+                arc_lengths[~known_vertices_mask],
+                arc_lengths[known_vertices_mask],
+                tin_vertices_z[known_vertices_mask],
                 period=perimeter,
             )
-            for vertex_index, z in enumerate(vertex_z):
+            # Set the newly calculated elevations to the geometry
+            for vertex_index, z in enumerate(tin_vertices_z):
                 x, y, _ = exterior.GetPoint(vertex_index)
                 exterior.SetPoint(vertex_index, x, y, z)
             x, y, _ = exterior.GetPoint(0)
-            exterior.SetPoint(closing_point_index, x, y, vertex_z[0])
+            exterior.SetPoint(closing_point_index, x, y, tin_vertices_z[0])
+
+        # Determine constrained delaunay triangulation
+        shapely_polygon = from_wkb(bytes(tin_geom.ExportToWkb()))
+        triangles = constrained_delaunay_triangles(shapely_polygon)
+
+        # Do barycentric interpolation
+        print(triangles)
