@@ -1,4 +1,4 @@
-name: release-action
+name: test
 
 # Run on pull requests and on the master branch itself.
 on:
