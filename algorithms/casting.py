@@ -2,6 +2,7 @@ from typing import Any
 
 import numpy as np
 from osgeo import gdal, ogr
+from scipy.interpolate import LinearNDInterpolator
 from shapely import constrained_delaunay_triangles, from_wkb
 
 from .utils import periodic_linear_interp
@@ -123,5 +124,55 @@ def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, pixel_size: float) -> None:
         shapely_polygon = from_wkb(bytes(tin_geom.ExportToWkb()))
         triangles = constrained_delaunay_triangles(shapely_polygon)
 
-        # Do barycentric interpolation
+        # TEST Create triangles geopackage
+        triangles_gpkg = None
+        triangles_layer = None
+        driver = ogr.GetDriverByName("GPKG")
+        triangles_gpkg = driver.CreateDataSource("triangles.gpkg")
+        triangles_layer = triangles_gpkg.CreateLayer(
+            "triangles", geom_type=ogr.wkbPolygon
+        )
+        for triangle in triangles.geoms:
+            feature = ogr.Feature(triangles_layer.GetLayerDefn())
+            triangle_ogr = ogr.CreateGeometryFromWkb(triangle.wkb)
+            feature.SetGeometry(triangle_ogr)
+            triangles_layer.CreateFeature(feature)
+        triangles_gpkg = None
         print(triangles)
+
+        # Extract triangle vertices and z-values for interpolation
+        tri_points = []
+        tri_z = []
+        for triangle in triangles.geoms:
+            coords = list(triangle.exterior.coords)[:-1]  # Remove closing point
+            if len(coords) == 3:
+                for coord in coords:
+                    tri_points.append((coord[0], coord[1]))
+                    tri_z.append(coord[2])
+
+        if not tri_points:
+            continue
+
+        # Create linear interpolator
+        tri_points = np.array(tri_points)
+        tri_z = np.array(tri_z)
+        interp = LinearNDInterpolator(tri_points, tri_z, fill_value=-9999.0)
+
+        # Apply interpolation to raster
+        band = out_ds.GetRasterBand(1)
+        band.SetNoDataValue(-9999.0)
+        geotransform = out_ds.GetGeoTransform()
+        raster_array = band.ReadAsArray()
+        minx, px_width, _, maxy, _, px_height = geotransform
+
+        # TODO: iterate over triangle.bounds?
+        for row in range(raster_array.shape[0]):
+            for col in range(raster_array.shape[1]):
+                # Convert pixel coordinates to world coordinates
+                px_x = minx + col * px_width
+                px_y = maxy + row * px_height
+
+                z_interp = interp(px_x, px_y)
+                raster_array[row, col] = z_interp
+
+        band.WriteArray(raster_array)

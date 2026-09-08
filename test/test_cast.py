@@ -12,13 +12,17 @@ class TestCasting:
         data_dir = Path(__file__).parent / "data"
         gpkg_path = data_dir / "example.gpkg"
         raster_path = data_dir / "dem.tif"
-        output_path = tmp_path / "output.tif"
+        output_path = "output.tif"
 
         ogr.UseExceptions()
         gpkg_ds = ogr.Open(str(gpkg_path))
         raster_ds = gdal.Open(str(raster_path))
         driver = gdal.GetDriverByName("GTiff")
         out_ds = driver.CreateCopy(str(output_path), raster_ds)
+
+        # Set nodata value
+        band = out_ds.GetRasterBand(1)
+        band.SetNoDataValue(-9999.0)
 
         surface_layer = gpkg_ds.GetLayerByName("surface")
         pixel_size = abs(raster_ds.GetGeoTransform()[1])
