@@ -4,11 +4,11 @@ name: release-action
 on:
   push:
     branches:
-      - master
+      - main
     tags:
       - "*"
   pull_request:
-
+  workflow_dispatch:
 
 jobs:
   build_upload:
