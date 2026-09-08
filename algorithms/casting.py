@@ -2,8 +2,10 @@ from typing import Any
 
 import numpy as np
 from osgeo import gdal, ogr
+from osgeo.gdal import ApplyGeoTransform, InvGeoTransform
 from scipy.interpolate import LinearNDInterpolator
 from shapely import constrained_delaunay_triangles, from_wkb
+from shapely.geometry import Point
 
 from .utils import periodic_linear_interp
 
@@ -18,7 +20,7 @@ def apply_constant(gpkg_path: str, out_ds: Any) -> None:
     )
 
 
-def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, pixel_size: float) -> None:
+def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, pixel_size: float) -> bool:
     # Retrieve tin surfaces
     layer.SetAttributeFilter("definition_type = 'tin'")
     tin_surface_features = [f for f in layer]
@@ -47,7 +49,9 @@ def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, pixel_size: float) -> None:
                 (
                     f.GetGeometryRef().GetX(),
                     f.GetGeometryRef().GetY(),
-                    f["elevation"],  # Note that this is not the elevation, just 0
+                    f[
+                        "elevation"
+                    ],  # Note that this is not the Z, but attribute "elevation"
                 )
                 for f in elev_point_layer
             ]
@@ -124,55 +128,62 @@ def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, pixel_size: float) -> None:
         shapely_polygon = from_wkb(bytes(tin_geom.ExportToWkb()))
         triangles = constrained_delaunay_triangles(shapely_polygon)
 
-        # TEST Create triangles geopackage
-        triangles_gpkg = None
-        triangles_layer = None
-        driver = ogr.GetDriverByName("GPKG")
-        triangles_gpkg = driver.CreateDataSource("triangles.gpkg")
-        triangles_layer = triangles_gpkg.CreateLayer(
-            "triangles", geom_type=ogr.wkbPolygon
-        )
-        for triangle in triangles.geoms:
-            feature = ogr.Feature(triangles_layer.GetLayerDefn())
-            triangle_ogr = ogr.CreateGeometryFromWkb(triangle.wkb)
-            feature.SetGeometry(triangle_ogr)
-            triangles_layer.CreateFeature(feature)
-        triangles_gpkg = None
-        print(triangles)
-
-        # Extract triangle vertices and z-values for interpolation
-        tri_points = []
-        tri_z = []
-        for triangle in triangles.geoms:
-            coords = list(triangle.exterior.coords)[:-1]  # Remove closing point
-            if len(coords) == 3:
-                for coord in coords:
-                    tri_points.append((coord[0], coord[1]))
-                    tri_z.append(coord[2])
-
-        if not tri_points:
-            continue
-
-        # Create linear interpolator
-        tri_points = np.array(tri_points)
-        tri_z = np.array(tri_z)
-        interp = LinearNDInterpolator(tri_points, tri_z, fill_value=-9999.0)
+        # # TEST Create triangles geopackage
+        # triangles_gpkg = None
+        # triangles_layer = None
+        # driver = ogr.GetDriverByName("GPKG")
+        # triangles_gpkg = driver.CreateDataSource("triangles.gpkg")
+        # triangles_layer = triangles_gpkg.CreateLayer(
+        #     "triangles", geom_type=ogr.wkbPolygon
+        # )
+        # for triangle in triangles.geoms:
+        #     feature = ogr.Feature(triangles_layer.GetLayerDefn())
+        #     triangle_ogr = ogr.CreateGeometryFromWkb(triangle.wkb)
+        #     feature.SetGeometry(triangle_ogr)
+        #     triangles_layer.CreateFeature(feature)
+        # triangles_gpkg = None
+        # print(triangles)
 
         # Apply interpolation to raster
         band = out_ds.GetRasterBand(1)
         band.SetNoDataValue(-9999.0)
         geotransform = out_ds.GetGeoTransform()
-        raster_array = band.ReadAsArray()
         minx, px_width, _, maxy, _, px_height = geotransform
+        raster_array = band.ReadAsArray()
 
-        # TODO: iterate over triangle.bounds?
-        for row in range(raster_array.shape[0]):
-            for col in range(raster_array.shape[1]):
-                # Convert pixel coordinates to world coordinates
-                px_x = minx + col * px_width
-                px_y = maxy + row * px_height
+        for triangle in triangles.geoms:
+            coords = list(triangle.exterior.coords)[:-1]
+            if len(coords) != 3:
+                return False
 
-                z_interp = interp(px_x, px_y)
-                raster_array[row, col] = z_interp
+            tri_points = np.array([(coord[0], coord[1]) for coord in coords])
+            tri_z = np.array([coord[2] for coord in coords])
+            interp = LinearNDInterpolator(tri_points, tri_z, fill_value=-9999.0)
+
+            # Convert triangle bounds to raster pixel coordinates
+            min_tri_x, min_tri_y, max_tri_x, max_tri_y = triangle.bounds
+            inv_geotransform = InvGeoTransform(geotransform)
+
+            col_start_float, row_start_float = ApplyGeoTransform(
+                inv_geotransform, min_tri_x, max_tri_y
+            )
+            col_end_float, row_end_float = ApplyGeoTransform(
+                inv_geotransform, max_tri_x, min_tri_y
+            )
+
+            # Clamping to prevent setting of pixels outside the raster
+            col_start = max(0, int(np.floor(col_start_float)) - 1)
+            col_end = min(raster_array.shape[1], int(np.ceil(col_end_float)) + 1)
+            row_start = max(0, int(np.floor(row_start_float)) - 1)
+            row_end = min(raster_array.shape[0], int(np.ceil(row_end_float)) + 1)
+
+            for row in range(row_start, row_end):
+                for col in range(col_start, col_end):
+                    # Test pixel centers so values outside the triangle are untouched.
+                    px_x = minx + (col + 0.5) * px_width
+                    px_y = maxy + (row + 0.5) * px_height
+                    if triangle.covers(Point(px_x, px_y)):
+                        raster_array[row, col] = interp(px_x, px_y)
 
         band.WriteArray(raster_array)
+    return True
