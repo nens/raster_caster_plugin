@@ -21,15 +21,27 @@ class TestCasting:
         driver = gdal.GetDriverByName("GTiff")
         out_ds = driver.CreateCopy(str(output_path), raster_ds)
 
-        # Set nodata value
-        band = out_ds.GetRasterBand(1)
-        band.SetNoDataValue(-9999.0)
-
         surface_layer = gpkg_ds.GetLayerByName("surface")
-        pixel_size = abs(raster_ds.GetGeoTransform()[1])
+        distance = 2.0
+        apply_constant(str(gpkg_path), out_ds)
+        apply_tin(gpkg_ds, surface_layer, out_ds, distance)
+
+    def test_full_pipeline_holes_dem(self, tmp_path: Path) -> None:
+        data_dir = Path(__file__).parent / "data"
+        gpkg_path = data_dir / "example_holes.gpkg"
+        raster_path = data_dir / "dem.tif"
+        output_path = "output_dem_holes.tif"
+
+        ogr.UseExceptions()
+        gpkg_ds = ogr.Open(str(gpkg_path))
+        raster_ds = gdal.Open(str(raster_path))
+        driver = gdal.GetDriverByName("GTiff")
+        out_ds = driver.CreateCopy(str(output_path), raster_ds)
+        surface_layer = gpkg_ds.GetLayerByName("surface")
+        distance = 2.0
 
         apply_constant(str(gpkg_path), out_ds)
-        apply_tin(gpkg_ds, surface_layer, out_ds, pixel_size)
+        apply_tin(gpkg_ds, surface_layer, out_ds, distance)
 
     def test_full_pipeline_no_dem(self, tmp_path: Path) -> None:
         data_dir = Path(__file__).parent / "data"
