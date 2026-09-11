@@ -20,7 +20,7 @@ def apply_constant(gpkg_path: str, out_ds: Any) -> None:
     )
 
 
-def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, pixel_size: float) -> bool:
+def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, distance: float) -> bool:
     # Retrieve tin surfaces
     layer.SetAttributeFilter("definition_type = 'tin'")
     tin_surface_features = [f for f in layer]
@@ -28,9 +28,8 @@ def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, pixel_size: float) -> bool:
 
     elev_point_layer = gpkg_ds.GetLayerByName("elevation_point")
 
-    # TODO: add in_polygon_only feature
     for tin_surface in tin_surface_features:
-        # Convert surface to PolygonZ
+        # Convert surface polygons to PolygonZ
         tin_geom = tin_surface.GetGeometryRef()
         polygon_z = ogr.Geometry(ogr.wkbPolygon25D)
         for ring_index in range(tin_geom.GetGeometryCount()):
@@ -42,8 +41,9 @@ def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, pixel_size: float) -> bool:
             polygon_z.AddGeometry(ring_z)
         tin_geom = polygon_z
 
-        # Get the elevation points in the polygon TODO: with buffer?
-        elev_point_layer.SetSpatialFilter(tin_geom.Buffer(pixel_size))
+        # Get the elevation points in the polygon. The convex hull is used so that
+        # points in holes or concave parts of the polygon are also considered.
+        elev_point_layer.SetSpatialFilter(tin_geom.ConvexHull().Buffer(distance))
         elev_coords = np.array(
             [
                 (
@@ -61,6 +61,7 @@ def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, pixel_size: float) -> bool:
         if len(elev_coords) < 3:
             continue
 
+        # EXTERIOR
         # Associate the elev_coords points with nearest vertices for exterior
         exterior = tin_geom.GetGeometryRef(0)  # 0 is exterior?
         tin_vertices = np.array(
@@ -78,14 +79,16 @@ def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, pixel_size: float) -> bool:
         nearest_vertex_indices = np.argmin(
             np.sum(distances * distances, axis=2), axis=1
         )
-        for elevation_point, vertex_index in zip(elev_coords, nearest_vertex_indices):
-            print(elevation_point[:2], tin_vertices[vertex_index])
 
         # Replace each nearest exterior vertex Z-value with the elevation point
         # value (Note that this is not the Z-value, but the attribute value
         closing_point_index = exterior.GetPointCount() - 1
         for elevation_point, vertex_index in zip(elev_coords, nearest_vertex_indices):
             x, y, z = exterior.GetPoint(int(vertex_index))
+            # Only snap elevation points that are close enough to the ring
+            # Hypot calculates Euclidean distance
+            if np.hypot(elevation_point[0] - x, elevation_point[1] - y) > distance:
+                continue
             exterior.SetPoint(int(vertex_index), x, y, elevation_point[2])
             if vertex_index == 0:
                 # The exterior ring is closed, update both start and end
@@ -105,8 +108,7 @@ def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, pixel_size: float) -> bool:
             [exterior.GetPoint(index)[2] for index in range(len(tin_vertices))]
         )
         known_vertices_mask = tin_vertices_z != -9999.0
-        # Calculate the distance along the polygon perimeter to the start of each
-        # vertex.
+        # Calc the distance along the polygon perimeter to the start of each vertex.
         # Take cumulutive sum up to second last edge, prepend with 0.0 for first vertex
         # Note that the final arc (returning to first vertex) is excluded.
         arc_lengths = np.concatenate(([0.0], np.cumsum(edge_lengths[:-1])))
@@ -124,25 +126,101 @@ def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, pixel_size: float) -> bool:
             x, y, _ = exterior.GetPoint(0)
             exterior.SetPoint(closing_point_index, x, y, tin_vertices_z[0])
 
+        # RINGS
+        # Now process the holes (rings). If it is not assigned 1+ elevation point,
+        # it should simply extract a hole in the raster,
+        # otherwise should be part of the constrained delaunay triangulation.
+        if tin_geom.GetGeometryCount() > 1:
+            # Iterate over the holes in reverse so removing one keeps the remaining
+            # ring indices valid
+            mask_rings = []
+
+            for ring_index in reversed(range(1, tin_geom.GetGeometryCount())):
+                ring_geometry = tin_geom.GetGeometryRef(ring_index)
+                ring_vertices = np.array(
+                    [
+                        ring_geometry.GetPoint(index)[:2]  # drop Z
+                        for index in range(ring_geometry.GetPointCount() - 1)
+                    ]
+                )
+                distances = elev_xy[:, np.newaxis] - ring_vertices[np.newaxis, :]
+                nearest_vertex_indices = np.argmin(
+                    np.sum(distances * distances, axis=2), axis=1
+                )
+
+                closing_point_index = ring_geometry.GetPointCount() - 1
+                assigned_an_elevation = False
+                for elevation_point, vertex_index in zip(
+                    elev_coords, nearest_vertex_indices
+                ):
+                    x, y, z = ring_geometry.GetPoint(int(vertex_index))
+                    if (
+                        np.hypot(elevation_point[0] - x, elevation_point[1] - y)
+                        > distance
+                    ):
+                        continue
+                    assigned_an_elevation = True
+                    ring_geometry.SetPoint(int(vertex_index), x, y, elevation_point[2])
+                    if vertex_index == 0:
+                        ring_geometry.SetPoint(
+                            closing_point_index, x, y, elevation_point[2]
+                        )
+
+                # This hole does not elevation points, should only be used to
+                # mask raster
+                if not assigned_an_elevation:
+                    # Clone first, RemoveGeometry destroys the ring
+                    mask_rings.append(ring_geometry.Clone())
+                    tin_geom.RemoveGeometry(ring_index)
+                else:
+                    edge_lengths = np.linalg.norm(
+                        np.roll(ring_vertices, -1, axis=0) - ring_vertices,
+                        axis=1,
+                    )
+                    perimeter = float(np.sum(edge_lengths))
+                    ring_vertices_z = np.array(
+                        [
+                            ring_geometry.GetPoint(index)[2]
+                            for index in range(len(ring_vertices))
+                        ]
+                    )
+                    known_vertices_mask = ring_vertices_z != -9999.0
+                    arc_lengths = np.concatenate(([0.0], np.cumsum(edge_lengths[:-1])))
+                    if perimeter > 0 and np.any(known_vertices_mask):
+                        ring_vertices_z[~known_vertices_mask] = periodic_linear_interp(
+                            arc_lengths[~known_vertices_mask],
+                            arc_lengths[known_vertices_mask],
+                            ring_vertices_z[known_vertices_mask],
+                            period=perimeter,
+                        )
+                        # Set the newly calculated elevations to the geometry
+                        for vertex_index, z in enumerate(ring_vertices_z):
+                            x, y, _ = ring_geometry.GetPoint(vertex_index)
+                            ring_geometry.SetPoint(vertex_index, x, y, z)
+                        x, y, _ = ring_geometry.GetPoint(0)
+                        ring_geometry.SetPoint(
+                            closing_point_index, x, y, ring_vertices_z[0]
+                        )
+
         # Determine constrained delaunay triangulation
         shapely_polygon = from_wkb(bytes(tin_geom.ExportToWkb()))
         triangles = constrained_delaunay_triangles(shapely_polygon)
 
-        # # TEST Create triangles geopackage
-        # triangles_gpkg = None
-        # triangles_layer = None
-        # driver = ogr.GetDriverByName("GPKG")
-        # triangles_gpkg = driver.CreateDataSource("triangles.gpkg")
-        # triangles_layer = triangles_gpkg.CreateLayer(
-        #     "triangles", geom_type=ogr.wkbPolygon
-        # )
-        # for triangle in triangles.geoms:
-        #     feature = ogr.Feature(triangles_layer.GetLayerDefn())
-        #     triangle_ogr = ogr.CreateGeometryFromWkb(triangle.wkb)
-        #     feature.SetGeometry(triangle_ogr)
-        #     triangles_layer.CreateFeature(feature)
-        # triangles_gpkg = None
-        # print(triangles)
+        # TEST Create triangles geopackage
+        triangles_gpkg = None
+        triangles_layer = None
+        driver = ogr.GetDriverByName("GPKG")
+        triangles_gpkg = driver.CreateDataSource("triangles_holes.gpkg")
+        triangles_layer = triangles_gpkg.CreateLayer(
+            "triangles", geom_type=ogr.wkbPolygon
+        )
+        for triangle in triangles.geoms:
+            feature = ogr.Feature(triangles_layer.GetLayerDefn())
+            triangle_ogr = ogr.CreateGeometryFromWkb(triangle.wkb)
+            feature.SetGeometry(triangle_ogr)
+            triangles_layer.CreateFeature(feature)
+        triangles_gpkg = None
+        print(triangles)
 
         # Apply interpolation to raster
         band = out_ds.GetRasterBand(1)
