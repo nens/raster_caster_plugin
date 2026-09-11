@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+output_no_dem_holes.tif
+output_no_dem.tif
+output.tif
