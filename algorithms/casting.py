@@ -61,146 +61,100 @@ def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, distance: float) -> bool:
         if len(elev_coords) < 3:
             continue
 
-        # EXTERIOR
-        # Associate the elev_coords points with nearest vertices for exterior
-        exterior = tin_geom.GetGeometryRef(0)  # 0 is exterior?
-        tin_vertices = np.array(
-            [
-                exterior.GetPoint(index)[:2]  # drop Z
-                for index in range(exterior.GetPointCount() - 1)
-            ]
-        )
-        # Use 2D for distance
+        # Use 2D for determining nearest elevation point
         elev_xy = elev_coords[:, :2]  # drop Z
-        # newaxis allows for broadcasting:
-        # (distances[i, j] = elev_xy[i] - tin_vertices[j])
-        distances = elev_xy[:, np.newaxis] - tin_vertices[np.newaxis, :]
-        # Sum the squared x-distance and y-distance, and take the minimum
-        nearest_vertex_indices = np.argmin(
-            np.sum(distances * distances, axis=2), axis=1
-        )
 
-        # Replace each nearest exterior vertex Z-value with the elevation point
-        # value (Note that this is not the Z-value, but the attribute value
-        closing_point_index = exterior.GetPointCount() - 1
-        for elevation_point, vertex_index in zip(elev_coords, nearest_vertex_indices):
-            x, y, z = exterior.GetPoint(int(vertex_index))
-            # Only snap elevation points that are close enough to the ring
-            # Hypot calculates Euclidean distance
-            if np.hypot(elevation_point[0] - x, elevation_point[1] - y) > distance:
-                continue
-            exterior.SetPoint(int(vertex_index), x, y, elevation_point[2])
-            if vertex_index == 0:
-                # The exterior ring is closed, update both start and end
-                exterior.SetPoint(closing_point_index, x, y, elevation_point[2])
-
-        # Determine the individual segment lengths and perimenter of the geometry by
-        # determining the norm between a vertex and the previous
-        # validated in QGIS with Measurement tool (extract vertices)
-        edge_lengths = np.linalg.norm(
-            np.roll(tin_vertices, -1, axis=0) - tin_vertices,
-            axis=1,
-        )
-        # Validated in QGIS with $perimeter
-        perimeter = float(np.sum(edge_lengths))
-
-        tin_vertices_z = np.array(
-            [exterior.GetPoint(index)[2] for index in range(len(tin_vertices))]
-        )
-        known_vertices_mask = tin_vertices_z != -9999.0
-        # Calc the distance along the polygon perimeter to the start of each vertex.
-        # Take cumulutive sum up to second last edge, prepend with 0.0 for first vertex
-        # Note that the final arc (returning to first vertex) is excluded.
-        arc_lengths = np.concatenate(([0.0], np.cumsum(edge_lengths[:-1])))
-        if perimeter > 0 and np.any(known_vertices_mask):
-            tin_vertices_z[~known_vertices_mask] = periodic_linear_interp(
-                arc_lengths[~known_vertices_mask],
-                arc_lengths[known_vertices_mask],
-                tin_vertices_z[known_vertices_mask],
-                period=perimeter,
+        # Loop over the rings (index 0 is exterior). Iterate over the holes
+        # in reverse so removing one keeps the remaining ring indices valid.
+        # Rings with no assigned elevation points will be used as pure masks
+        mask_rings = []
+        for ring_index in reversed(range(0, tin_geom.GetGeometryCount())):
+            ring_geom = tin_geom.GetGeometryRef(ring_index)
+            ring_vertices = np.array(
+                [
+                    ring_geom.GetPoint(index)[:2]  # drop Z
+                    for index in range(ring_geom.GetPointCount() - 1)
+                ]
             )
-            # Set the newly calculated elevations to the geometry
-            for vertex_index, z in enumerate(tin_vertices_z):
-                x, y, _ = exterior.GetPoint(vertex_index)
-                exterior.SetPoint(vertex_index, x, y, z)
-            x, y, _ = exterior.GetPoint(0)
-            exterior.SetPoint(closing_point_index, x, y, tin_vertices_z[0])
 
-        # RINGS
-        # Now process the holes (rings). If it is not assigned 1+ elevation point,
-        # it should simply extract a hole in the raster,
-        # otherwise should be part of the constrained delaunay triangulation.
-        if tin_geom.GetGeometryCount() > 1:
-            # Iterate over the holes in reverse so removing one keeps the remaining
-            # ring indices valid
-            mask_rings = []
+            # newaxis allows for broadcasting:
+            # (distances[i, j] = elev_xy[i] - tin_vertices[j])
+            distances = elev_xy[:, np.newaxis] - ring_vertices[np.newaxis, :]
+            # Sum the squared x-distance and y-distance, and take the minimum
+            nearest_vertex_indices = np.argmin(
+                np.sum(distances * distances, axis=2), axis=1
+            )
 
-            for ring_index in reversed(range(1, tin_geom.GetGeometryCount())):
-                ring_geometry = tin_geom.GetGeometryRef(ring_index)
-                ring_vertices = np.array(
+            # Replace each nearest ring vertex Z-value with the elevation point
+            # value (Note that this is not the Z-value, but the attribute value)
+            # Only when it is not too far away
+            closing_point_index = ring_geom.GetPointCount() - 1
+            assigned_an_elevation = False
+            for elevation_point, vertex_index in zip(
+                elev_coords, nearest_vertex_indices
+            ):
+                x, y, z = ring_geom.GetPoint(int(vertex_index))
+                # Only snap elevation points that are close enough to the ring
+                # Hypot calculates Euclidean distance
+                if np.hypot(elevation_point[0] - x, elevation_point[1] - y) > distance:
+                    continue
+                assigned_an_elevation = True
+                ring_geom.SetPoint(int(vertex_index), x, y, elevation_point[2])
+                if vertex_index == 0:
+                    # The ring is closed, update both start and end
+                    ring_geom.SetPoint(closing_point_index, x, y, elevation_point[2])
+
+            # This ring does not have assigned elevation points, should only be used to
+            # mask raster
+            if not assigned_an_elevation:
+                if ring_index == 0:
+                    return False
+                # Clone first, RemoveGeometry destroys the ring
+                mask_rings.append(ring_geom.Clone())
+                tin_geom.RemoveGeometry(ring_index)
+            else:
+                # Determine the individ. segment lengths and perimeter of geometry by
+                # determining the norm between a vertex and the previous.
+                # Validated in QGIS with Measurement tool (extract vertices)
+                edge_lengths = np.linalg.norm(
+                    np.roll(ring_vertices, -1, axis=0) - ring_vertices,
+                    axis=1,
+                )
+                # Validated in QGIS with $perimeter
+                perimeter = float(np.sum(edge_lengths))
+
+                ring_vertices_z = np.array(
                     [
-                        ring_geometry.GetPoint(index)[:2]  # drop Z
-                        for index in range(ring_geometry.GetPointCount() - 1)
+                        ring_geom.GetPoint(index)[2]
+                        for index in range(len(ring_vertices))
                     ]
                 )
-                distances = elev_xy[:, np.newaxis] - ring_vertices[np.newaxis, :]
-                nearest_vertex_indices = np.argmin(
-                    np.sum(distances * distances, axis=2), axis=1
-                )
-
-                closing_point_index = ring_geometry.GetPointCount() - 1
-                assigned_an_elevation = False
-                for elevation_point, vertex_index in zip(
-                    elev_coords, nearest_vertex_indices
-                ):
-                    x, y, z = ring_geometry.GetPoint(int(vertex_index))
-                    if (
-                        np.hypot(elevation_point[0] - x, elevation_point[1] - y)
-                        > distance
-                    ):
-                        continue
-                    assigned_an_elevation = True
-                    ring_geometry.SetPoint(int(vertex_index), x, y, elevation_point[2])
-                    if vertex_index == 0:
-                        ring_geometry.SetPoint(
-                            closing_point_index, x, y, elevation_point[2]
-                        )
-
-                # This hole does not elevation points, should only be used to
-                # mask raster
-                if not assigned_an_elevation:
-                    # Clone first, RemoveGeometry destroys the ring
-                    mask_rings.append(ring_geometry.Clone())
-                    tin_geom.RemoveGeometry(ring_index)
-                else:
-                    edge_lengths = np.linalg.norm(
-                        np.roll(ring_vertices, -1, axis=0) - ring_vertices,
-                        axis=1,
+                known_vertices_mask = ring_vertices_z != -9999.0
+                # Calc the distance along the perimeter to the start of each vertex.
+                # Take cumulutive sum up to second last edge, prepend with 0.0 for
+                # first vertex. Note that the final arc (returning to first vertex)
+                # is excluded.
+                arc_lengths = np.concatenate(([0.0], np.cumsum(edge_lengths[:-1])))
+                if perimeter > 0 and np.any(known_vertices_mask):
+                    ring_vertices_z[~known_vertices_mask] = periodic_linear_interp(
+                        arc_lengths[~known_vertices_mask],
+                        arc_lengths[known_vertices_mask],
+                        ring_vertices_z[known_vertices_mask],
+                        period=perimeter,
                     )
-                    perimeter = float(np.sum(edge_lengths))
-                    ring_vertices_z = np.array(
-                        [
-                            ring_geometry.GetPoint(index)[2]
-                            for index in range(len(ring_vertices))
-                        ]
-                    )
-                    known_vertices_mask = ring_vertices_z != -9999.0
-                    arc_lengths = np.concatenate(([0.0], np.cumsum(edge_lengths[:-1])))
-                    if perimeter > 0 and np.any(known_vertices_mask):
-                        ring_vertices_z[~known_vertices_mask] = periodic_linear_interp(
-                            arc_lengths[~known_vertices_mask],
-                            arc_lengths[known_vertices_mask],
-                            ring_vertices_z[known_vertices_mask],
-                            period=perimeter,
-                        )
-                        # Set the newly calculated elevations to the geometry
-                        for vertex_index, z in enumerate(ring_vertices_z):
-                            x, y, _ = ring_geometry.GetPoint(vertex_index)
-                            ring_geometry.SetPoint(vertex_index, x, y, z)
-                        x, y, _ = ring_geometry.GetPoint(0)
-                        ring_geometry.SetPoint(
-                            closing_point_index, x, y, ring_vertices_z[0]
-                        )
+                    # Set the newly calculated elevations to the geometry
+                    for vertex_index, z in enumerate(ring_vertices_z):
+                        x, y, _ = ring_geom.GetPoint(vertex_index)
+                        ring_geom.SetPoint(vertex_index, x, y, z)
+                    x, y, _ = ring_geom.GetPoint(0)
+                    ring_geom.SetPoint(closing_point_index, x, y, ring_vertices_z[0])
+
+        # Wrap the mask rings in polygons so pixels can be tested against them
+        mask_polygons = []
+        for mask_ring in mask_rings:
+            mask_polygon = ogr.Geometry(ogr.wkbPolygon)
+            mask_polygon.AddGeometry(mask_ring)
+            mask_polygons.append(from_wkb(bytes(mask_polygon.ExportToWkb())))
 
         # Determine constrained delaunay triangulation
         shapely_polygon = from_wkb(bytes(tin_geom.ExportToWkb()))
@@ -257,11 +211,18 @@ def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, distance: float) -> bool:
 
             for row in range(row_start, row_end):
                 for col in range(col_start, col_end):
-                    # Test pixel centers so values outside the triangle are untouched.
+                    # Test pixel centers
                     px_x = minx + (col + 0.5) * px_width
                     px_y = maxy + (row + 0.5) * px_height
-                    if triangle.covers(Point(px_x, px_y)):
-                        raster_array[row, col] = interp(px_x, px_y)
+                    pixel = Point(px_x, px_y)
+                    if not triangle.covers(pixel):
+                        continue
+                    # Masked rings are not set
+                    if any(
+                        mask_polygon.covers(pixel) for mask_polygon in mask_polygons
+                    ):
+                        continue
+                    raster_array[row, col] = interp(px_x, px_y)
 
         band.WriteArray(raster_array)
     return True
