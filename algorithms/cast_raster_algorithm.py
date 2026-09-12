@@ -7,8 +7,8 @@ from qgis.core import (
     QgsProcessingContext,
     QgsProcessingFeedback,
     QgsProcessingParameterFile,
-    QgsProcessingParameterFileDestination,
     QgsProcessingParameterNumber,
+    QgsProcessingParameterRasterDestination,
     QgsProcessingParameterRasterLayer,
 )
 
@@ -77,10 +77,9 @@ class CastRasterAlgorithm(QgsProcessingAlgorithm):
             )
         )
         self.addParameter(
-            QgsProcessingParameterFileDestination(
+            QgsProcessingParameterRasterDestination(
                 self.OUTPUT,
                 "Output Raster",
-                fileFilter="GeoTIFF files (*.tif)",
             )
         )
 
@@ -103,7 +102,7 @@ class CastRasterAlgorithm(QgsProcessingAlgorithm):
     ) -> dict[str, str]:
         gpkg_path = self.parameterAsString(parameters, self.INPUT_GPKG, context)
         raster = self.parameterAsRasterLayer(parameters, self.INPUT_RASTER, context)
-        output_path = self.parameterAsString(parameters, self.OUTPUT, context)
+        output_path = self.parameterAsOutputLayer(parameters, self.OUTPUT, context)
         snapping_distance = self.parameterAsDouble(
             parameters, self.SNAPPING_DISTANCE, context
         )
