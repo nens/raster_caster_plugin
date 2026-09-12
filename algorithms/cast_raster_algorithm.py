@@ -1,7 +1,6 @@
 import math
 from typing import Any
 
-import numpy as np
 from osgeo import gdal, ogr
 from qgis.core import (
     QgsProcessingAlgorithm,
@@ -22,6 +21,7 @@ class CastRasterAlgorithm(QgsProcessingAlgorithm):
     INPUT_GPKG = "INPUT_GPKG"
     INPUT_RASTER = "INPUT_RASTER"
     PIXEL_SIZE = "PIXEL_SIZE"
+    SNAPPING_DISTANCE = "SNAPPING_DISTANCE"
     OUTPUT = "OUTPUT"
 
     def name(self) -> str:
@@ -68,6 +68,15 @@ class CastRasterAlgorithm(QgsProcessingAlgorithm):
             )
         )
         self.addParameter(
+            QgsProcessingParameterNumber(
+                self.SNAPPING_DISTANCE,
+                "Snapping distance",
+                type=QgsProcessingParameterNumber.Type.Double,
+                minValue=0.0,
+                defaultValue=10.0,
+            )
+        )
+        self.addParameter(
             QgsProcessingParameterFileDestination(
                 self.OUTPUT,
                 "Output Raster",
@@ -95,6 +104,9 @@ class CastRasterAlgorithm(QgsProcessingAlgorithm):
         gpkg_path = self.parameterAsString(parameters, self.INPUT_GPKG, context)
         raster = self.parameterAsRasterLayer(parameters, self.INPUT_RASTER, context)
         output_path = self.parameterAsString(parameters, self.OUTPUT, context)
+        snapping_distance = self.parameterAsDouble(
+            parameters, self.SNAPPING_DISTANCE, context
+        )
 
         if raster is not None:
             pixel_size = raster.rasterUnitsPerPixelX()
@@ -124,10 +136,9 @@ class CastRasterAlgorithm(QgsProcessingAlgorithm):
 
             band = out_ds.GetRasterBand(1)
             band.SetNoDataValue(-9999.0)
-            band.WriteArray(np.ones((rows, cols), dtype=np.float32))
 
         apply_constant(gpkg_path, out_ds)
-        apply_tin(gpkg_ds, layer, out_ds, pixel_size)
+        apply_tin(gpkg_ds, layer, out_ds, snapping_distance)
 
         out_ds = None
         gpkg_ds = None
