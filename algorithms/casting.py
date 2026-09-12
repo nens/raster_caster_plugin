@@ -192,6 +192,10 @@ def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, distance: float) -> bool:
             if len(coords) != 3:
                 return False
 
+            # Sort so a triangle always yields the same interpolator, regardless of
+            # the vertex order the triangulation happened to emit, LinearNDInterpolator
+            # can have a numerical noise depending on the order.
+            coords.sort()
             tri_points = np.array([(coord[0], coord[1]) for coord in coords])
             tri_z = np.array([coord[2] for coord in coords])
             interp = LinearNDInterpolator(tri_points, tri_z, fill_value=-9999.0)
