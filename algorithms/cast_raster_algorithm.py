@@ -139,7 +139,4 @@ class CastRasterAlgorithm(QgsProcessingAlgorithm):
         apply_constant(gpkg_path, out_ds)
         apply_tin(gpkg_ds, layer, out_ds, snapping_distance)
 
-        out_ds = None
-        gpkg_ds = None
-
         return {self.OUTPUT: output_path}

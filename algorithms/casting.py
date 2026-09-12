@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -164,7 +165,10 @@ def apply_tin(gpkg_ds: Any, layer: Any, out_ds: Any, distance: float) -> bool:
         triangles_gpkg = None
         triangles_layer = None
         driver = ogr.GetDriverByName("GPKG")
-        triangles_gpkg = driver.CreateDataSource("triangles_holes.gpkg")
+        triangles_path = Path(out_ds.GetDescription()).with_suffix(".gpkg")
+        if triangles_path.exists():
+            driver.DeleteDataSource(str(triangles_path))
+        triangles_gpkg = driver.CreateDataSource(str(triangles_path))
         triangles_layer = triangles_gpkg.CreateLayer(
             "triangles", geom_type=ogr.wkbPolygon
         )

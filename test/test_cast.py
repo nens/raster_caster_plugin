@@ -22,7 +22,7 @@ class TestCasting:
         out_ds = driver.CreateCopy(str(output_path), raster_ds)
 
         surface_layer = gpkg_ds.GetLayerByName("surface")
-        distance = 2.0
+        distance = 3.0
         apply_constant(str(gpkg_path), out_ds)
         apply_tin(gpkg_ds, surface_layer, out_ds, distance)
 
@@ -38,7 +38,7 @@ class TestCasting:
         driver = gdal.GetDriverByName("GTiff")
         out_ds = driver.CreateCopy(str(output_path), raster_ds)
         surface_layer = gpkg_ds.GetLayerByName("surface")
-        distance = 2.0
+        distance = 3.0
 
         apply_constant(str(gpkg_path), out_ds)
         apply_tin(gpkg_ds, surface_layer, out_ds, distance)
@@ -53,6 +53,7 @@ class TestCasting:
         surface_layer = gpkg_ds.GetLayerByName("surface")
         srs = surface_layer.GetSpatialRef()
         pixel_size = 0.5
+        distance = 3.0
 
         # Create base raster
         min_x, max_x, min_y, max_y = (
@@ -68,7 +69,7 @@ class TestCasting:
         band.SetNoDataValue(-9999.0)
 
         apply_constant(str(gpkg_path), out_ds)
-        apply_tin(gpkg_ds, surface_layer, out_ds, pixel_size)
+        apply_tin(gpkg_ds, surface_layer, out_ds, distance)
 
     def test_full_pipeline_holes(self, tmp_path: Path) -> None:
         data_dir = Path(__file__).parent / "data"
@@ -80,7 +81,7 @@ class TestCasting:
         surface_layer = gpkg_ds.GetLayerByName("surface")
         srs = surface_layer.GetSpatialRef()
         pixel_size = 0.5
-        distance = 2.0
+        distance = 3.0
 
         # Create base raster
         min_x, max_x, min_y, max_y = (
